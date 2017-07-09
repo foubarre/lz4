@@ -2,12 +2,11 @@ package lz4_test
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/big"
+	"math/rand"
 	"os"
 	"reflect"
 	"testing"
@@ -190,27 +189,28 @@ func init() {
 	testHeaderItems = buildHeaders(seed)
 }
 
+var random, repeat, repeatlow []byte
+
 // Initialize the test data with various sizes of uncompressible and compressible data.
 func init() {
 	maxSize := 10 << 20 // > max block max size of 4Mb
 
 	// repeated data with very high compression ratio
-	repeat := make([]byte, maxSize)
+	repeat = make([]byte, maxSize)
 	for i := copy(repeat, lorem); i < len(repeat); {
 		i += copy(repeat[i:], repeat[:i])
 	}
 
 	// repeated data with small compression ratio
-	repeatlow := make([]byte, maxSize)
-	for i := 0; i < len(repeatlow); {
-		i += copy(repeatlow[i:], lorem)
-		// randomly skip some bytes to make sure the pattern does not repeat too much
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(10)))
-		i += int(n.Int64())
+	repeatlow = append(repeatlow[:0], repeat...)
+	// randomly swap 2% of bytes
+	for i := 0; i < maxSize/50; i++ {
+		a, b := rand.Intn(maxSize), rand.Intn(maxSize)
+		repeatlow[a], repeatlow[b] = repeatlow[b], repeatlow[a]
 	}
 
 	// random data: low to no compression
-	random := make([]byte, maxSize)
+	random = make([]byte, maxSize)
 	if _, err := rand.Read(random); err != nil {
 		panic(fmt.Sprintf("cannot initialize random data for size %d", maxSize))
 	}
@@ -223,6 +223,8 @@ func init() {
 			testData{fmt.Sprintf("random < %d", size), random[:size/3]},
 			testData{fmt.Sprintf("repeated %d", size), repeat[:size]},
 			testData{fmt.Sprintf("repeated < %d", size), repeat[:size/3]},
+			testData{fmt.Sprintf("repeatedlow %d", size), repeatlow[:size]},
+			testData{fmt.Sprintf("repeatedlow < %d", size), repeatlow[:size/3]},
 		)
 	}
 }
@@ -694,5 +696,71 @@ func TestMultiBlockWrite(t *testing.T) {
 	zr := lz4.NewReader(zbuf)
 	if _, err := io.Copy(buf, zr); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func BenchmarkWriter(b *testing.B) {
+	in := repeatlow
+	r := bytes.NewReader(in)
+	tmp, err := ioutil.TempDir("testdata", "out")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(tmp)
+	for i := 0; i < b.N; i++ {
+		r.Reset(in)
+		out, err := ioutil.TempFile(tmp, "benchwrite.lz4.")
+		if err != nil {
+			b.Fatal(err)
+		}
+		zw := lz4.NewWriter(out)
+		if _, err := io.Copy(zw, r); err != nil {
+			b.Fatal(err)
+		}
+		if err := zw.Flush(); err != nil {
+			b.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if err := out.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReader(b *testing.B) {
+	tmp, err := ioutil.TempDir("testdata", "out")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(tmp)
+	src := bytes.NewReader(repeatlow)
+	buf := new(bytes.Buffer)
+	zw := lz4.NewWriter(buf)
+	if _, err := io.Copy(zw, src); err != nil {
+		b.Fatal(err)
+	}
+	if err := zw.Flush(); err != nil {
+		b.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		b.Fatal(err)
+	}
+	in := bytes.NewReader(buf.Bytes())
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		in.Reset(buf.Bytes())
+		out, err := ioutil.TempFile(tmp, "benchread.")
+		if err != nil {
+			b.Fatal(err)
+		}
+		zr := lz4.NewReader(in)
+		if _, err := io.Copy(out, zr); err != nil {
+			b.Fatal(err)
+		}
+		if err := out.Close(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
