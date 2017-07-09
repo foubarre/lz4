@@ -125,22 +125,23 @@ func CompressBlock(src, dst []byte, soffset int) (int, error) {
 
 	// fast scan strategy:
 	// we only need a hash table to store the last sequences (4 bytes)
-	var hashTable [1 << hashLog]int
-	var hashShift = uint((minMatch * 8) - hashLog)
+	var hashTable [hashTableSize]int
 
 	// Initialise the hash table with the first 64Kb of the input buffer
 	// (used when compressing dependent blocks)
 	for si < soffset {
-		h := binary.LittleEndian.Uint32(src[si:]) * hasher >> hashShift
+		h := uint16(u32(src[si:si+4]) * hasher >> hashShift)
 		si++
 		hashTable[h] = si
 	}
 
 	anchor := si
+	srcAnchor := src[anchor:]
 	fma := 1 << skipStrength
 	for si < sn-minMatch {
 		// hash the next 4 bytes (sequence)...
-		h := binary.LittleEndian.Uint32(src[si:]) * hasher >> hashShift
+		v4 := src[si : si+4]
+		h := uint16(u32(v4) * hasher >> hashShift)
 		// -1 to separate existing entries from new ones
 		ref := hashTable[h] - 1
 		// ...and store the position of the hash in the hash table (+1 to compensate the -1 upon saving)
@@ -157,15 +158,22 @@ func CompressBlock(src, dst []byte, soffset int) (int, error) {
 
 		// the sequence is new, out of bound (64kb) or not valid: try next sequence
 		if ref < 0 || fma&(1<<skipStrength-1) < 4 ||
-			(si-ref)>>winSizeLog > 0 ||
-			src[ref] != src[si] ||
-			src[ref+1] != src[si+1] ||
-			src[ref+2] != src[si+2] ||
-			src[ref+3] != src[si+3] {
+			(si-ref)>>winSizeLog > 0 {
 			// variable step: improves performance on non-compressible data
 			si += fma >> skipStrength
 			fma++
 			continue
+		} else {
+			r4 := src[ref : ref+4]
+			if r4[0] != v4[0] ||
+				r4[1] != v4[1] ||
+				r4[2] != v4[2] ||
+				r4[3] != v4[3] {
+				// variable step: improves performance on non-compressible data
+				si += fma >> skipStrength
+				fma++
+				continue
+			}
 		}
 		// match found
 		fma = 1 << skipStrength
@@ -175,9 +183,16 @@ func CompressBlock(src, dst []byte, soffset int) (int, error) {
 		// encode match length part 1
 		si += minMatch
 		mLen := si // match length has minMatch already
-		for si <= sn && src[si] == src[si-offset] {
-			si++
+		var mi int
+		srcMatch := src[si : sn+1]
+		srcPrev := src[si-offset:][:len(srcMatch)]
+		var v byte
+		for mi, v = range srcMatch {
+			if v != srcPrev[mi] {
+				break
+			}
 		}
+		si += mi
 		mLen = si - mLen
 		if mLen < 0xF {
 			dst[di] = byte(mLen)
@@ -210,8 +225,9 @@ func CompressBlock(src, dst []byte, soffset int) (int, error) {
 		if di+lLen >= dn {
 			return di, ErrShortBuffer
 		}
-		di += copy(dst[di:], src[anchor:anchor+lLen])
+		di += copy(dst[di:], srcAnchor[:lLen])
 		anchor = si
+		srcAnchor = src[si:]
 
 		// encode offset
 		if di += 2; di >= dn {
@@ -292,7 +308,6 @@ func CompressBlockHC(src, dst []byte, soffset int) (int, error) {
 	// the chain table cannot contain more entries than the window size (64Kb entries)
 	var hashTable [1 << hashLog]int
 	var chainTable [winSize]int
-	var hashShift = uint((minMatch * 8) - hashLog)
 
 	// Initialise the hash table with the first 64Kb of the input buffer
 	// (used when compressing dependent blocks)
@@ -442,4 +457,9 @@ func CompressBlockHC(src, dst []byte, soffset int) (int, error) {
 	}
 	di += copy(dst[di:], src)
 	return di, nil
+}
+
+func u32(buf []byte) uint32 {
+	// go compiler recognizes this pattern and optimizes it on little endian platforms
+	return uint32(buf[0]) | uint32(buf[1])<<8 | uint32(buf[2])<<16 | uint32(buf[3])<<24
 }
