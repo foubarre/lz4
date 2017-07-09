@@ -699,21 +699,12 @@ func TestMultiBlockWrite(t *testing.T) {
 	}
 }
 
-func BenchmarkWriter(b *testing.B) {
+func BenchmarkWriter10M(b *testing.B) {
 	in := repeatlow
 	r := bytes.NewReader(in)
-	tmp, err := ioutil.TempDir("testdata", "out")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer os.RemoveAll(tmp)
 	for i := 0; i < b.N; i++ {
 		r.Reset(in)
-		out, err := ioutil.TempFile(tmp, "benchwrite.lz4.")
-		if err != nil {
-			b.Fatal(err)
-		}
-		zw := lz4.NewWriter(out)
+		zw := lz4.NewWriter(ioutil.Discard)
 		if _, err := io.Copy(zw, r); err != nil {
 			b.Fatal(err)
 		}
@@ -723,21 +714,14 @@ func BenchmarkWriter(b *testing.B) {
 		if err := zw.Close(); err != nil {
 			b.Fatal(err)
 		}
-		if err := out.Close(); err != nil {
-			b.Fatal(err)
-		}
 	}
 }
 
-func BenchmarkReader(b *testing.B) {
-	tmp, err := ioutil.TempDir("testdata", "out")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer os.RemoveAll(tmp)
+func BenchmarkReader10M(b *testing.B) {
 	src := bytes.NewReader(repeatlow)
 	buf := new(bytes.Buffer)
 	zw := lz4.NewWriter(buf)
+	zw.Flush()
 	if _, err := io.Copy(zw, src); err != nil {
 		b.Fatal(err)
 	}
@@ -751,15 +735,8 @@ func BenchmarkReader(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		in.Reset(buf.Bytes())
-		out, err := ioutil.TempFile(tmp, "benchread.")
-		if err != nil {
-			b.Fatal(err)
-		}
 		zr := lz4.NewReader(in)
-		if _, err := io.Copy(out, zr); err != nil {
-			b.Fatal(err)
-		}
-		if err := out.Close(); err != nil {
+		if _, err := io.Copy(ioutil.Discard, zr); err != nil {
 			b.Fatal(err)
 		}
 	}
